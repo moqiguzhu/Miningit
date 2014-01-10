@@ -1,9 +1,0 @@
-#this is a README file!
-
-analyse_patch.py is based on Python 2.7.
-
-analyse_patch.py has a limited function at present, I mean, It can analyse patch and find which class this patch works on! Now, It is able to analyse source file coded in Java, C source file and other language source file will be added later on.
-
-As I have said, this program is coded by Python 2.7, the newest version of python is Python 3.4 or newer,There are much difference between Python 3.x and Python 2.x. According to opinion of professor song, this project need to be complished with Python 3.x, so I will update this file later using Python 3.x.
-
-
