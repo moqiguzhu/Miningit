@@ -1,0 +1,91 @@
+					基于Miningit的patch分析流程
+流程1：
+1.从数据库中取出下一条信息（id，commit_id，file_name，patch）
+2.读取patch中的信息，分析patch开始处两个路径是否完全相同；不相同，记录下id，进入第三步
+3.根据commit_id，查询scmlog表，取出与此commit_id相对应的rev字段信息file_new
+4.根据rev字段信息和第二个路径信息，使用git命令恢复打上patch之后的文件，称之为file_old
+5.根据rev-1和第一个路径信息，使用git命令回复打上patch之前的文件，不管怎样，用rev-1恢复的总是在打上这个patch之前和打上patch之后对应文件最接近的一个文件
+6.继续读取patch中的信息，读取其中下一个用@@。。。@@包含的信息，每一条这样的信息包括4个整数，取出第一个整数和第三个整数
+7.在file_old中定位到第一个整数标示的这一行，用正则表达式匹配，如果这一行是某个函数的开始，保存这个函数名，如果这一行不是某个函数的开始，那么就需要向上匹配，如果到文件的第一行还是没有找到某个函数的开始，那么这一处的修改不位于某个函数内，需要记录下来，否则，把找到的第一个函数记录下来。
+8.对file_new函数进行同样的处理，只是用第三个整数定位
+9.回到第六步，处理下一个@@。。。@@
+10.回到第一步，开始处理下一条数据量库信息。
+
+
+流程2：
+flag1 = False 	flag2 = False
+1.从patches表中取出下一个patch信息。
+2.这个patch是否处理完毕，没有，读取patch中的下一行行文本（line），否则，跳到第一步。
+3.如果flag1 = True，mystr = mystr + line，如果这行包括一个')'，并且这行是以'{'结尾，则认为多行函数的定义在这一行结束，将mystr加入到func集合中，flag1 = False，mystr 置空，如果这行以';'结尾，则认为虽然这是一个多行定义的函数，但是这只是一个函数的声明，直接将置为假，跳到第二步
+4.如果flag2 = True， 如果这行是以'-' 或者'+'开头，则认为这个函数发生了改变，将mystr加入到func集合中，flag2置假，mystr置空，如果这行文本以'}'结尾，则认为这个函数没有发生改变，同样将 flag2置假，mystr置空，跳到第二步。
+5判断这行文本是不是以'{'结尾
+6.如果是，判断这行文本中是否包含关键字'class'，如果包含，视这行文本是一个类的定义，将line加入到集合cla中，如果不包含，判断这行文本是否包含private public protected三个关键字中的一个，如果有其中一个关键字，跳到第四步，如果没有，跳到第二步
+7.判断这行文本是不是包含')' '('两个字符，如果包含，判断这行文本是不是以；结尾，是则跳到第二步，不是，则判断这行是不是以'-' 或者'+'开头，如果是，则认为这行是一个函数的定义，并且这个函数在这个patch里修改了，将line加入到集合func中，如果这行不是以'-' 或者'+'开头，则这是一个函数的定义，但是这个函数不一定改变了，将line记录下来(mystr = mystr + line) flag2 = True
+8.如果行文本不包含')' '('两个字符，但是包含'('字符并且以','结尾，则说明这个函数的定义可能占据多行，
+flag1 = True, mystr = mystr + line，如果这行文本没有以'-' 或者'+'开头，flag2 = True
+9.跳到第二步
+
+
+
+
+补充：上面的流程1仅仅适用于修改的内容完全位于某个函数中的情况，如果修改的内容不完全位于某个函数中，或者patch给出的信息是从类定义的前一行开始，那么这个流程是找不到任何信息的，这就需要下面额外的扫描。
+
+这次扫描的数据来源是patch，旨在找到在patch中出现的所有的函数和类的定义，当然函数的声明要过滤掉。如果是修改一个函数的定义，可能会出现找到的函数中其实包含新旧两个版本的函数定义，为了防止这种情况的出现，定义了一个叫two_function_filter的函数，这个函数能够处理这种情况。
+所有函数的定义找到之后，我们需要更加详细的数据，也就是说需要知道这个函数是patch新增加的，还是删除的，还是只是modified，为此，又定义了一个叫做oldfunc_newfunc的函数，这个函数的会在新文件和旧文件中匹配每一个找到的函数，如果只在旧文件中匹配到，那么这个函数是被删除的，如果只在新文件中找到，那么这个函数是新增加的，虽然可以在分析patch的时候就可以区分函数是新增的还是删除的，但是那样使我的函数代码可读性降低，并且可靠性没有我现在采用的这种方法可靠。
+
+另外的思路：
+在patches表中每一个id 对应一个commit_id 和一个file_id，用这两个id去hunk表中寻找数据，可以找到一系列的hunk，分析每个hunk。
+分析hunk是不是一个完整的类或者函数的定义，如果是则另外处理。
+不是就从hunk中拿出一行到源文件中去匹配，找到这一行所属于的函数和类。
+
+关于流程中的一些问题阐述：
+1.对于不同的语言，需要提取的信息是不完全一致的，比如，对于c语言，这是一种面向过程的语言，我们只需要知道patch作用于哪个文件的哪个函数即可，但是对于java语言，这是一种面向对象的语言，我们不仅想知道patch作用于哪一个文件的哪一个函数，更重要的是我们想知道修改位于哪一个类之中，或者更为准确的说，因为在面向对象的语言中，函数是不能单独存在的，必须位于某一个类之中，所以知道修改了哪个类是必须的。
+在本程序中，我想把编程语言分为面向对象的语言和面向过程的语言，在编写程序的时候会以c语言和java语言作为两类语言的参照。
+2.本程序使用python语言来实现，在具体实现的时候，当需要恢复某个文件时，把恢复的文件总是存到file_old和file_new之中，并且这一次恢复的内容总是覆盖上一次恢复的内容。（目前是想这样实现，因为没有使用过git，对其指令也不熟悉，日后可能会有更加高效的方式，毕竟这里涉及到多次的读写，效率极有可能不尽如人意。）
+#这里有一个问题，有没有必要将恢复的文件存到file_new和file_old之中，这样做势必会影响程序的执行效率，直接在恢复的文件上面进行处理这样行不行
+3.对于面向对象的语言来说，当定位到的行包括或者不包括类的定义时，都需要向下搜索，直到找到下一个@@。。。@@标记为止，在这过程中找到的所有函数的信息和类的定义都需要记录下来（可不可能存在记录下来的某个类完全没有修改的情况，目前我觉得是不存在这种情况的，根据patch记录信息的特征来分析）
+4.在编程的过程中一个非常重要的内容是函数和类的正则表达式，有没有可能某个完全不相关的内容（有可能是注释）恰好符合了正则表达式，存不存在这样的情况，如果存在，出现的概率是多少，这些都需要通过实践来检验
+5.如何快速定位到指定的函数，python有没有现成的实现，若没有，这一部分需要自己实现，实现的时候要非常认真地考虑效率问题
+关于函数的识别问题，还是用最明显的几个标志来识别，private/public/protected ()之类
+6.一次将patches表中的数据全部取出来好像不现实，毕竟其中存的数据量达到GB的级别，fetchall()会不会报错（有没有做过优化），如果一次取超过内存的数据会报错，那么我该怎么做，将数据库的查询分成很多小部分可能是一个不错的选择（between 0 and 1000）
+
+
+
+analyse_patch table schema:
+
+id
+patch_id
+commit_id
+file_id
+old_class
+new_class
+old_function
+new_function
+if_id1
+
+If class was added, 'old_class' will be NULL.If class was deleted, 'new class' will be NULL.
+These two rules are also right to function.
+When file is not a source file. old_class, new_class, old_function, new_function all will be NULL.
+Obviously, this rule is suitable for if_id1 = 1(True) or if_id1 = 0(False)
+
+* `id`: Auto-generated database identifier.
+* `hunk_id`: This is a foreign key to 'hunk.id'
+* `patch_id`:This is a foreign key to 'patch.id'
+* `commit_id`: The revision for the file of interest.
+* `file_id`: This is the foreign key to 'file.id'
+* `old_class`: According to my understanding, one hunk responds to one class, or we say one hunk must exist in definition of someone class
+. 'old_class' is class definition before patching
+* `new class`: 'new_class' is class definition after patching
+* `old_function`:functions definition which exist in 'old_class', we only record function definition  that have been changed.
+* `new_function`:functions definition which exist in 'new_class'.
+* `if_id1`: boolean type, if True,indicating that commit_id = 1. When commit_id = 1, this patch is first edition.
+
+最开始的想法：
+现在遇到的问题是无法准确地识别文档内的函数，现在我想开发一个自己的类来完成这项工作
+类名称就叫做：parsefunctionname
+类的功能：传入一个文件作为要解析的对象，输出在这个函数的哪些地方出现过函数的定义，函数调用不算
+写在算法前面的一段话：为了找到所有的函数定义，或者说尽可能准确和完整地找到函数的定义，可能需要不止一次的扫描，找出java语言的函数定义比找出C语言的函数定义要简单得多，或许一个比较长的正则表达式就能完成这项工作，不妨一试（因为有内建类型，好像也不好做）
+算法：
+第一遍，定位到有(出现的行
+第二遍：利用正则表达式判断这是不是一个函数定义
+关键字是一个集合【public private protected static final void char int long float double】
